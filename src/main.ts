@@ -4,6 +4,7 @@ import {
 	Plugin,
 	PluginSettingTab,
 	Setting,
+	TAbstractFile,
 	TFile,
 	normalizePath,
 } from "obsidian";
@@ -41,6 +42,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 	private retryTimerId: number | null = null;
 	private syncIntervalId: number | null = null;
 	private statusBarItemEl: HTMLElement | null = null;
+	private localWritesUnlocked = false;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -106,6 +108,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 		});
 
 		this.addSettingTab(new GitHubVaultSyncSettingTab(this.app, this));
+		this.registerLocalEditTracking();
 		this.registerVaultRenameTracking();
 		this.registerFocusLossEvents();
 		this.refreshAutoSyncInterval();
@@ -113,7 +116,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 
 		if (this.settings.syncOnStartup && this.settings.initialized) {
 			this.requestSync({
-				action: () => this.engine.sync(),
+				action: () => this.runSessionAwareSync(),
 				label: this.translate("actionStartupSync"),
 				notifyOnFailure: true,
 				notifyOnSuccess: true,
@@ -194,7 +197,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 		}
 
 		this.requestSync({
-			action: () => this.engine.sync(),
+			action: () => this.runSessionAwareSync(),
 			label: this.translate("actionManualSync"),
 			notifyOnStart: true,
 			notifyOnFailure: true,
@@ -215,6 +218,26 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 		});
 	}
 
+	private registerLocalEditTracking(): void {
+		this.registerEvent(
+			this.app.vault.on("create", (file) => {
+				this.markLocalWriteUnlocked(file);
+			}),
+		);
+
+		this.registerEvent(
+			this.app.vault.on("modify", (file) => {
+				this.markLocalWriteUnlocked(file);
+			}),
+		);
+
+		this.registerEvent(
+			this.app.vault.on("delete", (file) => {
+				this.markLocalWriteUnlocked(file);
+			}),
+		);
+	}
+
 	private registerVaultRenameTracking(): void {
 		this.registerEvent(
 			this.app.vault.on("rename", (file, oldPath) => {
@@ -222,6 +245,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 					return;
 				}
 
+				this.localWritesUnlocked = true;
 				void this.trackPendingRename(oldPath, file.path);
 			}),
 		);
@@ -267,7 +291,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 
 		this.lastFocusLossSyncRequestAt = now;
 		this.requestSync({
-			action: () => this.engine.sync(),
+			action: () => this.runSessionAwareSync(),
 			label: this.translate("actionFocusLossSync"),
 			notifyOnFailure: true,
 			notifyOnSuccess: true,
@@ -288,7 +312,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 
 		this.syncIntervalId = window.setInterval(() => {
 			this.requestSync({
-				action: () => this.engine.sync(),
+				action: () => this.runSessionAwareSync(),
 				label: this.translate("actionScheduledSync"),
 				notifyOnFailure: true,
 				notifyOnSuccess: true,
@@ -416,7 +440,32 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 			return;
 		}
 
+		this.localWritesUnlocked = true;
 		await this.app.vault.modify(file, editorContent);
+	}
+
+	private async runSessionAwareSync(): Promise<SyncResult> {
+		return this.engine.sync({ allowWrite: this.localWritesUnlocked });
+	}
+
+	private markLocalWriteUnlocked(file: TAbstractFile): void {
+		if (this.engine.shouldIgnoreVaultEvents()) {
+			return;
+		}
+
+		if (!this.isSyncRelevantPath(file.path)) {
+			return;
+		}
+
+		this.localWritesUnlocked = true;
+	}
+
+	private isSyncRelevantPath(path: string): boolean {
+		if (this.engine.isSyncCandidate(path)) {
+			return true;
+		}
+
+		return Boolean(this.settings.fileStates[normalizePath(path)]);
 	}
 }
 

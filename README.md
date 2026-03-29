@@ -30,6 +30,11 @@ Obsidian 노트를 GitHub 저장소와 동기화해서 여러 환경의 Obsidian
 3. `dist/` 안의 파일을 Obsidian vault의 `.obsidian/plugins/github-vault-sync/`에 복사
 4. Obsidian Community Plugins에서 활성화
 
+### 설치 스크립트
+
+- Windows에서 `install.bat`를 실행하거나 `scripts/install.ps1`를 직접 실행할 수 있습니다.
+- 또는 `npm run install:obsidian` 실행 후 vault 경로를 입력하면 `dist/` 파일이 자동으로 `.obsidian/plugins/github-vault-sync/`로 복사됩니다.
+
 ## 설정 항목
 
 - `GitHub Owner`

@@ -42,6 +42,10 @@ interface CommitOutcome {
 	uploadedShas: Map<string, string>;
 }
 
+interface SyncOptions {
+	allowWrite?: boolean;
+}
+
 const FAST_FORWARD_RETRY_LIMIT = 3;
 
 export class SyncEngine {
@@ -126,8 +130,8 @@ export class SyncEngine {
 		return this.withFastForwardRetry(() => this.pushLocalSnapshotOnce());
 	}
 
-	async sync(): Promise<SyncResult> {
-		return this.withFastForwardRetry(() => this.syncOnce());
+	async sync(options?: SyncOptions): Promise<SyncResult> {
+		return this.withFastForwardRetry(() => this.syncOnce(options));
 	}
 
 	private async pushLocalSnapshotOnce(): Promise<SyncResult> {
@@ -162,9 +166,10 @@ export class SyncEngine {
 		};
 	}
 
-	private async syncOnce(): Promise<SyncResult> {
+	private async syncOnce(options?: SyncOptions): Promise<SyncResult> {
 		const settings = this.getSettings();
 		this.ensureConfigured(settings);
+		const allowWrite = options?.allowWrite ?? true;
 
 		if (!settings.initialized) {
 			throw new Error("먼저 초기 Pull 또는 Push를 한 번 실행해야 합니다.");
@@ -181,32 +186,34 @@ export class SyncEngine {
 		const nextState = { ...settings.fileStates };
 		const processedPaths = new Set<string>();
 
-		const renameOperations = await this.collectPendingRenames(
-			snapshot,
-			localFiles,
-			remoteContentCache,
-			counters,
-		);
-		for (const rename of renameOperations) {
-			processedPaths.add(rename.fromVaultPath);
-			processedPaths.add(rename.toVaultPath);
-		}
-
-		const renameUploads = await this.buildUploadsForRenames(localFiles, renameOperations);
-		for (const upload of renameUploads) {
-			uploads.push(upload);
-			delete nextState[this.findRenameSourcePath(renameOperations, upload.vaultPath)];
-		}
-
-		for (const rename of renameOperations) {
-			const remote = snapshot.files.get(rename.fromVaultPath);
-			if (remote) {
-				deletes.push({
-					repoPath: remote.repoPath,
-					vaultPath: rename.fromVaultPath,
-				});
+		if (allowWrite) {
+			const renameOperations = await this.collectPendingRenames(
+				snapshot,
+				localFiles,
+				remoteContentCache,
+				counters,
+			);
+			for (const rename of renameOperations) {
+				processedPaths.add(rename.fromVaultPath);
+				processedPaths.add(rename.toVaultPath);
 			}
-			delete nextState[rename.fromVaultPath];
+
+			const renameUploads = await this.buildUploadsForRenames(localFiles, renameOperations);
+			for (const upload of renameUploads) {
+				uploads.push(upload);
+				delete nextState[this.findRenameSourcePath(renameOperations, upload.vaultPath)];
+			}
+
+			for (const rename of renameOperations) {
+				const remote = snapshot.files.get(rename.fromVaultPath);
+				if (remote) {
+					deletes.push({
+						repoPath: remote.repoPath,
+						vaultPath: rename.fromVaultPath,
+					});
+				}
+				delete nextState[rename.fromVaultPath];
+			}
 		}
 
 		const candidatePaths = new Set<string>([
@@ -230,6 +237,59 @@ export class SyncEngine {
 			const previous = settings.fileStates[vaultPath];
 			const localContent = localFile ? await this.app.vault.cachedRead(localFile) : null;
 			const localHash = localContent ? await hashText(localContent) : null;
+
+			if (!allowWrite) {
+				if (localFile && remote) {
+					const remoteContent = await this.getRemoteContent(client, remoteContentCache, remote.sha);
+					const remoteHash = await hashText(remoteContent);
+
+					if (remoteHash === localHash) {
+						nextState[vaultPath] = { localHash, remoteSha: remote.sha };
+						counters.unchanged += 1;
+					} else {
+						if (settings.createConflictCopies && localContent !== null) {
+							await this.writeConflictCopy(vaultPath, localContent, "local");
+							counters.conflicts += 1;
+						}
+
+						await this.writeVaultFile(vaultPath, remoteContent);
+						nextState[vaultPath] = {
+							localHash: remoteHash,
+							remoteSha: remote.sha,
+						};
+						counters.downloaded += 1;
+					}
+					continue;
+				}
+
+				if (localFile && !remote) {
+					if (!previous || previous.remoteSha === null) {
+						nextState[vaultPath] = {
+							localHash,
+							remoteSha: previous?.remoteSha ?? null,
+						};
+						counters.unchanged += 1;
+					} else {
+						if (settings.createConflictCopies && localContent !== null && localHash !== previous.localHash) {
+							await this.writeConflictCopy(vaultPath, localContent, "local");
+							counters.conflicts += 1;
+						}
+
+						await this.deleteVaultPath(vaultPath);
+						delete nextState[vaultPath];
+						counters.deletedLocal += 1;
+					}
+					continue;
+				}
+
+				if (!localFile && remote) {
+					downloads.push({ remoteSha: remote.sha, vaultPath });
+					continue;
+				}
+
+				delete nextState[vaultPath];
+				continue;
+			}
 
 			if (localFile && remote) {
 				if (!previous) {
@@ -300,13 +360,28 @@ export class SyncEngine {
 			}
 
 			if (localFile && !remote) {
-				if (!previous || previous.remoteSha === null) {
+				if (!previous) {
 					uploads.push({
 						content: localContent ?? "",
 						localHash: localHash ?? "",
 						repoPath: this.toRepoPath(vaultPath),
 						vaultPath,
 					});
+				} else if (previous.remoteSha === null) {
+					if (localHash === previous.localHash) {
+						nextState[vaultPath] = {
+							localHash,
+							remoteSha: null,
+						};
+						counters.unchanged += 1;
+					} else {
+						uploads.push({
+							content: localContent ?? "",
+							localHash: localHash ?? "",
+							repoPath: this.toRepoPath(vaultPath),
+							vaultPath,
+						});
+					}
 				} else if (localHash !== previous.localHash) {
 					uploads.push({
 						content: localContent ?? "",
