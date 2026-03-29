@@ -1,0 +1,24 @@
+{
+  "name": "github-vault-sync",
+  "version": "0.1.0",
+  "description": "Obsidian plugin for syncing notes with a GitHub repository.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs --production"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "github",
+    "sync"
+  ],
+  "author": "Codex",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "esbuild": "^0.25.2",
+    "obsidian": "latest",
+    "typescript": "^5.8.3"
+  }
+}

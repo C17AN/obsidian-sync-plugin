@@ -1,0 +1,68 @@
+.github-vault-sync-settings,
+.github-vault-sync-settings .setting-item,
+.github-vault-sync-settings input,
+.github-vault-sync-settings button,
+.github-vault-sync-settings textarea {
+	font-family: "Pretendard", var(--font-interface-theme), sans-serif;
+}
+
+.github-vault-sync-settings h2 {
+	margin-bottom: 8px;
+	font-weight: 700;
+}
+
+.github-vault-sync-settings p {
+	margin-top: 0;
+	margin-bottom: 20px;
+	color: var(--text-muted);
+	line-height: 1.6;
+}
+
+.github-vault-sync-settings .setting-item {
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.github-vault-sync-settings .setting-item-name {
+	font-weight: 600;
+}
+
+.github-vault-sync-settings .github-vault-sync-quick-actions .setting-item-control {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	justify-content: flex-start;
+	max-width: 100%;
+}
+
+.github-vault-sync-settings .github-vault-sync-quick-actions .setting-item-control button {
+	flex: 1 1 132px;
+	margin: 0;
+	min-width: 120px;
+}
+
+@media (max-width: 720px) {
+	.github-vault-sync-settings .github-vault-sync-quick-actions {
+		align-items: stretch;
+	}
+
+	.github-vault-sync-settings .github-vault-sync-quick-actions .setting-item-info,
+	.github-vault-sync-settings .github-vault-sync-quick-actions .setting-item-control {
+		width: 100%;
+	}
+
+	.github-vault-sync-settings .github-vault-sync-quick-actions .setting-item-control {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.github-vault-sync-settings .github-vault-sync-quick-actions .setting-item-control button {
+		min-width: 0;
+		width: 100%;
+	}
+}
+
+@media (max-width: 420px) {
+	.github-vault-sync-settings .github-vault-sync-quick-actions .setting-item-control {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}

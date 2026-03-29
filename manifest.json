@@ -1,0 +1,9 @@
+{
+  "id": "github-vault-sync",
+  "name": "GitHub Vault Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "GitHub 저장소를 기준으로 Obsidian 노트를 양방향 동기화합니다.",
+  "author": "Codex",
+  "isDesktopOnly": false
+}
