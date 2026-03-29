@@ -33,6 +33,11 @@ interface PendingDelete {
 	repoPath: string;
 }
 
+interface PendingRename {
+	fromVaultPath: string;
+	toVaultPath: string;
+}
+
 interface CommitOutcome {
 	uploadedShas: Map<string, string>;
 }
@@ -50,6 +55,10 @@ export class SyncEngine {
 
 	shouldIgnoreVaultEvents(): boolean {
 		return this.suppressVaultEvents > 0;
+	}
+
+	isSyncCandidate(path: string): boolean {
+		return this.shouldSyncPath(path);
 	}
 
 	async validateConnection(): Promise<SyncResult> {
@@ -102,6 +111,7 @@ export class SyncEngine {
 		}
 
 		settings.fileStates = nextStates;
+		settings.pendingRenames = {};
 		settings.initialized = true;
 		settings.lastSyncAt = new Date().toISOString();
 		await this.saveSettings();
@@ -141,6 +151,7 @@ export class SyncEngine {
 		}
 
 		settings.fileStates = nextStates;
+		settings.pendingRenames = {};
 		settings.initialized = true;
 		settings.lastSyncAt = new Date().toISOString();
 		await this.saveSettings();
@@ -168,6 +179,35 @@ export class SyncEngine {
 		const deletes: PendingDelete[] = [];
 		const remoteContentCache = new Map<string, string>();
 		const nextState = { ...settings.fileStates };
+		const processedPaths = new Set<string>();
+
+		const renameOperations = await this.collectPendingRenames(
+			snapshot,
+			localFiles,
+			remoteContentCache,
+			counters,
+		);
+		for (const rename of renameOperations) {
+			processedPaths.add(rename.fromVaultPath);
+			processedPaths.add(rename.toVaultPath);
+		}
+
+		const renameUploads = await this.buildUploadsForRenames(localFiles, renameOperations);
+		for (const upload of renameUploads) {
+			uploads.push(upload);
+			delete nextState[this.findRenameSourcePath(renameOperations, upload.vaultPath)];
+		}
+
+		for (const rename of renameOperations) {
+			const remote = snapshot.files.get(rename.fromVaultPath);
+			if (remote) {
+				deletes.push({
+					repoPath: remote.repoPath,
+					vaultPath: rename.fromVaultPath,
+				});
+			}
+			delete nextState[rename.fromVaultPath];
+		}
 
 		const candidatePaths = new Set<string>([
 			...snapshot.files.keys(),
@@ -176,6 +216,10 @@ export class SyncEngine {
 		]);
 
 		for (const vaultPath of Array.from(candidatePaths).sort()) {
+			if (processedPaths.has(vaultPath)) {
+				continue;
+			}
+
 			if (!this.shouldSyncPath(vaultPath)) {
 				delete nextState[vaultPath];
 				continue;
@@ -326,6 +370,7 @@ export class SyncEngine {
 		}
 
 		settings.fileStates = nextState;
+		settings.pendingRenames = {};
 		settings.lastSyncAt = new Date().toISOString();
 		await this.saveSettings();
 
@@ -441,6 +486,86 @@ export class SyncEngine {
 		const content = await client.getBlobText(sha);
 		cache.set(sha, content);
 		return content;
+	}
+
+	private async collectPendingRenames(
+		snapshot: BranchSnapshot,
+		localFiles: Map<string, TFile>,
+		remoteContentCache: Map<string, string>,
+		counters: SyncCounters,
+	): Promise<PendingRename[]> {
+		const settings = this.getSettings();
+		const renameOperations: PendingRename[] = [];
+
+		for (const [fromPath, toPath] of Object.entries(settings.pendingRenames)) {
+			const fromVaultPath = normalizePath(fromPath);
+			const toVaultPath = normalizePath(toPath);
+
+			if (!fromVaultPath || !toVaultPath || fromVaultPath === toVaultPath) {
+				continue;
+			}
+
+			const localTargetFile = localFiles.get(toVaultPath) ?? null;
+			const remoteTarget = snapshot.files.get(toVaultPath) ?? null;
+
+			if (!this.shouldSyncPath(fromVaultPath) && !this.shouldSyncPath(toVaultPath)) {
+				continue;
+			}
+
+			if (!localTargetFile || !this.shouldSyncPath(toVaultPath)) {
+				renameOperations.push({ fromVaultPath, toVaultPath });
+				continue;
+			}
+
+			if (remoteTarget) {
+				const localContent = await this.app.vault.cachedRead(localTargetFile);
+				const localHash = await hashText(localContent);
+				const remoteContent = await this.getRemoteContent(
+					new GitHubApiClient(settings),
+					remoteContentCache,
+					remoteTarget.sha,
+				);
+				const remoteHash = await hashText(remoteContent);
+
+				if (remoteHash !== localHash && settings.createConflictCopies) {
+					await this.writeConflictCopy(toVaultPath, remoteContent, "remote");
+					counters.conflicts += 1;
+				}
+			}
+
+			renameOperations.push({ fromVaultPath, toVaultPath });
+		}
+
+		return renameOperations;
+	}
+
+	private async buildUploadsForRenames(
+		localFiles: Map<string, TFile>,
+		renameOperations: PendingRename[],
+	): Promise<PendingUpload[]> {
+		const uploads: PendingUpload[] = [];
+
+		for (const rename of renameOperations) {
+			const localFile = localFiles.get(rename.toVaultPath);
+			if (!localFile || !this.shouldSyncPath(rename.toVaultPath)) {
+				continue;
+			}
+
+			const content = await this.app.vault.cachedRead(localFile);
+			uploads.push({
+				content,
+				localHash: await hashText(content),
+				repoPath: this.toRepoPath(rename.toVaultPath),
+				vaultPath: rename.toVaultPath,
+			});
+		}
+
+		return uploads;
+	}
+
+	private findRenameSourcePath(renameOperations: PendingRename[], targetVaultPath: string): string {
+		const matchedRename = renameOperations.find((rename) => rename.toVaultPath === targetVaultPath);
+		return matchedRename?.fromVaultPath ?? targetVaultPath;
 	}
 
 	private async commitRemoteChanges(

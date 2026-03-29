@@ -16,9 +16,11 @@ export const DEFAULT_SETTINGS: GitHubSyncSettings = {
 	syncOnStartup: false,
 	createConflictCopies: true,
 	deviceName: "Current device",
+	uiLanguage: "ko",
 	initialized: false,
 	lastSyncAt: "",
 	fileStates: {},
+	pendingRenames: {},
 };
 
 export function cloneCounters(): SyncCounters {
@@ -127,6 +129,39 @@ export function summarizeCounters(counters: SyncCounters): string {
 		`conflicts ${counters.conflicts}`,
 		`unchanged ${counters.unchanged}`,
 	].join(", ");
+}
+
+export function mergePendingRename(
+	pendingRenames: Record<string, string>,
+	oldPath: string,
+	newPath: string,
+): Record<string, string> {
+	const normalizedOldPath = normalizePath(oldPath);
+	const normalizedNewPath = normalizePath(newPath);
+
+	if (!normalizedOldPath || !normalizedNewPath || normalizedOldPath === normalizedNewPath) {
+		return { ...pendingRenames };
+	}
+
+	const nextPendingRenames = { ...pendingRenames };
+	let sourcePath = normalizedOldPath;
+
+	for (const [fromPath, toPath] of Object.entries(nextPendingRenames)) {
+		if (normalizePath(toPath) === normalizedOldPath) {
+			sourcePath = normalizePath(fromPath);
+			delete nextPendingRenames[fromPath];
+			break;
+		}
+	}
+
+	delete nextPendingRenames[normalizedOldPath];
+
+	if (sourcePath === normalizedNewPath) {
+		return nextPendingRenames;
+	}
+
+	nextPendingRenames[sourcePath] = normalizedNewPath;
+	return nextPendingRenames;
 }
 
 export interface ParsedRepositoryInput {

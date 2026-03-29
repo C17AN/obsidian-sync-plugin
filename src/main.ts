@@ -4,18 +4,28 @@ import {
 	Plugin,
 	PluginSettingTab,
 	Setting,
+	TFile,
+	normalizePath,
 } from "obsidian";
 
-import { SyncEngine, formatResult } from "./sync-engine";
-import type { GitHubSyncSettings, SyncResult } from "./types";
-import { DEFAULT_SETTINGS, normalizeFolder, parseGitHubRepositoryInput } from "./utils";
+import { formatSyncSummary, t } from "./i18n";
+import { SyncEngine } from "./sync-engine";
+import type { GitHubSyncSettings, SyncResult, UiLanguage } from "./types";
+import {
+	DEFAULT_SETTINGS,
+	mergePendingRename,
+	normalizeFolder,
+	parseGitHubRepositoryInput,
+} from "./utils";
 
 interface SyncRequest {
 	action: () => Promise<SyncResult>;
 	label: string;
 	notifyOnFailure?: boolean;
 	notifyOnSuccess?: boolean;
+	notifyOnStart?: boolean;
 	suppressFastForwardNotice?: boolean;
+	flushActiveEditorBeforeSync?: boolean;
 }
 
 const AUTO_SYNC_RETRY_DELAY_MS = 10000;
@@ -44,33 +54,59 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "github-vault-sync-now",
-			name: "GitHub와 지금 동기화",
-			callback: () => this.runManualSync(),
+			name: this.translate("commandSyncNow"),
+			callback: () => {
+				void this.runManualSync();
+			},
+		});
+
+		this.addCommand({
+			id: "github-vault-sync-save-and-sync",
+			name: this.translate("commandSaveAndSync"),
+			editorCheckCallback: (checking) => {
+				if (this.isSyncing) {
+					return false;
+				}
+
+				if (!checking) {
+					void this.runManualSync({ skipIfSyncing: true });
+				}
+
+				return true;
+			},
+			hotkeys: [{ modifiers: ["Mod"], key: "S" }],
 		});
 
 		this.addCommand({
 			id: "github-vault-sync-pull-init",
-			name: "GitHub를 기준으로 초기 Pull",
-			callback: () => this.runInitializePull(),
+			name: this.translate("commandInitPull"),
+			callback: () => {
+				this.runInitializePull();
+			},
 		});
 
 		this.addCommand({
 			id: "github-vault-sync-push-init",
-			name: "로컬 볼트를 기준으로 초기 Push",
-			callback: () => this.runInitializePush(),
+			name: this.translate("commandInitPush"),
+			callback: () => {
+				this.runInitializePush();
+			},
 		});
 
 		this.addCommand({
 			id: "github-vault-sync-validate",
-			name: "GitHub 연결 확인",
-			callback: () => this.runValidate(),
+			name: this.translate("commandValidate"),
+			callback: () => {
+				this.runValidate();
+			},
 		});
 
-		this.addRibbonIcon("cloud", "GitHub Vault Sync", () => {
-			this.runManualSync();
+		this.addRibbonIcon("cloud", this.translate("ribbonTooltip"), () => {
+			void this.runManualSync();
 		});
 
 		this.addSettingTab(new GitHubVaultSyncSettingTab(this.app, this));
+		this.registerVaultRenameTracking();
 		this.registerFocusLossEvents();
 		this.refreshAutoSyncInterval();
 		this.updateStatusBar();
@@ -78,10 +114,11 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 		if (this.settings.syncOnStartup && this.settings.initialized) {
 			this.requestSync({
 				action: () => this.engine.sync(),
-				label: "시작 시 동기화",
+				label: this.translate("actionStartupSync"),
 				notifyOnFailure: true,
-				notifyOnSuccess: false,
+				notifyOnSuccess: true,
 				suppressFastForwardNotice: true,
+				flushActiveEditorBeforeSync: true,
 			});
 		}
 	}
@@ -104,6 +141,8 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 			repoBasePath: normalizeFolder(loaded?.repoBasePath ?? DEFAULT_SETTINGS.repoBasePath),
 			vaultBasePath: normalizeFolder(loaded?.vaultBasePath ?? DEFAULT_SETTINGS.vaultBasePath),
 			fileStates: loaded?.fileStates ?? {},
+			pendingRenames: loaded?.pendingRenames ?? {},
+			uiLanguage: loaded?.uiLanguage ?? DEFAULT_SETTINGS.uiLanguage,
 		};
 	}
 
@@ -113,10 +152,18 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 		this.updateStatusBar();
 	}
 
+	getLanguage(): UiLanguage {
+		return this.settings.uiLanguage ?? "ko";
+	}
+
+	translate(key: string, params?: Record<string, string | number>): string {
+		return t(this.getLanguage(), key, params);
+	}
+
 	runValidate(): void {
 		this.requestSync({
 			action: () => this.engine.validateConnection(),
-			label: "연결 확인",
+			label: this.translate("actionConnectionCheck"),
 			notifyOnFailure: true,
 			notifyOnSuccess: true,
 		});
@@ -125,7 +172,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 	runInitializePull(): void {
 		this.requestSync({
 			action: () => this.engine.initializeFromRemote(),
-			label: "초기 Pull",
+			label: this.translate("actionInitialPull"),
 			notifyOnFailure: true,
 			notifyOnSuccess: true,
 		});
@@ -134,18 +181,25 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 	runInitializePush(): void {
 		this.requestSync({
 			action: () => this.engine.pushLocalSnapshot(),
-			label: "초기 Push",
+			label: this.translate("actionInitialPush"),
 			notifyOnFailure: true,
 			notifyOnSuccess: true,
+			flushActiveEditorBeforeSync: true,
 		});
 	}
 
-	runManualSync(): void {
+	async runManualSync(options?: { skipIfSyncing?: boolean }): Promise<void> {
+		if (options?.skipIfSyncing && this.isSyncing) {
+			return;
+		}
+
 		this.requestSync({
 			action: () => this.engine.sync(),
-			label: "수동 동기화",
+			label: this.translate("actionManualSync"),
+			notifyOnStart: true,
 			notifyOnFailure: true,
 			notifyOnSuccess: true,
+			flushActiveEditorBeforeSync: true,
 		});
 	}
 
@@ -159,6 +213,41 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 				this.scheduleFocusLossSync();
 			}
 		});
+	}
+
+	private registerVaultRenameTracking(): void {
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) => {
+				if (!(file instanceof TFile) || this.engine.shouldIgnoreVaultEvents()) {
+					return;
+				}
+
+				void this.trackPendingRename(oldPath, file.path);
+			}),
+		);
+	}
+
+	private async trackPendingRename(oldPath: string, newPath: string): Promise<void> {
+		const normalizedOldPath = normalizePath(oldPath);
+		const normalizedNewPath = normalizePath(newPath);
+
+		if (normalizedOldPath === normalizedNewPath) {
+			return;
+		}
+
+		if (
+			!this.engine.isSyncCandidate(normalizedOldPath) &&
+			!this.engine.isSyncCandidate(normalizedNewPath)
+		) {
+			return;
+		}
+
+		this.settings.pendingRenames = mergePendingRename(
+			this.settings.pendingRenames,
+			normalizedOldPath,
+			normalizedNewPath,
+		);
+		await this.saveSettings();
 	}
 
 	private scheduleFocusLossSync(): void {
@@ -179,10 +268,11 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 		this.lastFocusLossSyncRequestAt = now;
 		this.requestSync({
 			action: () => this.engine.sync(),
-			label: "포커스 이탈 동기화",
+			label: this.translate("actionFocusLossSync"),
 			notifyOnFailure: true,
-			notifyOnSuccess: false,
+			notifyOnSuccess: true,
 			suppressFastForwardNotice: true,
+			flushActiveEditorBeforeSync: true,
 		});
 	}
 
@@ -199,10 +289,11 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 		this.syncIntervalId = window.setInterval(() => {
 			this.requestSync({
 				action: () => this.engine.sync(),
-				label: "주기 동기화",
+				label: this.translate("actionScheduledSync"),
 				notifyOnFailure: true,
-				notifyOnSuccess: false,
+				notifyOnSuccess: true,
 				suppressFastForwardNotice: true,
+				flushActiveEditorBeforeSync: true,
 			});
 		}, this.settings.autoSyncIntervalMinutes * 60 * 1000);
 	}
@@ -218,8 +309,10 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 		}
 
 		const label = this.settings.lastSyncAt
-			? `GitHub Sync: ${new Date(this.settings.lastSyncAt).toLocaleString()}`
-			: "GitHub Sync: not initialized";
+			? this.translate("statusLastSync", {
+					date: new Date(this.settings.lastSyncAt).toLocaleString(),
+				})
+			: this.translate("statusNotInitialized");
 		this.statusBarItemEl.setText(label);
 	}
 
@@ -234,9 +327,16 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 
 	private async executeSyncRequest(request: SyncRequest): Promise<void> {
 		this.isSyncing = true;
-		this.updateStatusBar(`GitHub Sync: ${request.label} 중...`);
+		this.updateStatusBar(this.translate("statusInProgress", { label: request.label }));
+		if (request.notifyOnStart) {
+			new Notice(this.translate("manualSyncStarted"), 3000);
+		}
 
 		try {
+			if (request.flushActiveEditorBeforeSync) {
+				await this.flushActiveEditorToVault();
+			}
+
 			const result = await request.action();
 			if (this.retryTimerId !== null) {
 				window.clearTimeout(this.retryTimerId);
@@ -244,7 +344,13 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 			}
 			this.updateStatusBar();
 			if (request.notifyOnSuccess) {
-				new Notice(`${request.label} 완료: ${formatResult(result)}`, 6000);
+				new Notice(
+					this.translate("noticeCompleted", {
+						label: request.label,
+						result: formatSyncSummary(result.counters, this.getLanguage()),
+					}),
+					6000,
+				);
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -255,7 +361,13 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 			} else {
 				this.updateStatusBar();
 				if (request.notifyOnFailure ?? true) {
-					new Notice(`${request.label} 실패: ${message}`, 8000);
+					new Notice(
+						this.translate("noticeFailed", {
+							label: request.label,
+							message,
+						}),
+						8000,
+					);
 				}
 			}
 		} finally {
@@ -273,17 +385,38 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 			window.clearTimeout(this.retryTimerId);
 		}
 
-		this.updateStatusBar(`GitHub Sync: 원격 갱신 충돌, ${AUTO_SYNC_RETRY_DELAY_MS / 1000}초 후 재시도`);
+		this.updateStatusBar(
+			this.translate("statusRetrying", { seconds: AUTO_SYNC_RETRY_DELAY_MS / 1000 }),
+		);
 		this.retryTimerId = window.setTimeout(() => {
 			this.retryTimerId = null;
 			this.requestSync({
 				...request,
-				label: "자동 재시도",
+				label: this.translate("actionAutomaticRetry"),
 				notifyOnFailure: true,
-				notifyOnSuccess: false,
+				notifyOnSuccess: true,
 				suppressFastForwardNotice: true,
 			});
 		}, AUTO_SYNC_RETRY_DELAY_MS);
+	}
+
+	private async flushActiveEditorToVault(): Promise<void> {
+		const activeEditor = this.app.workspace.activeEditor;
+		const file = activeEditor?.file;
+		const editor = activeEditor?.editor;
+
+		if (!(file instanceof TFile) || !editor) {
+			return;
+		}
+
+		const editorContent = editor.getValue();
+		const diskContent = await this.app.vault.cachedRead(file);
+
+		if (editorContent === diskContent) {
+			return;
+		}
+
+		await this.app.vault.modify(file, editorContent);
 	}
 }
 
@@ -302,17 +435,35 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 
 	display(): void {
 		const { containerEl } = this;
+		const tr = (key: string, params?: Record<string, string | number>) =>
+			this.plugin.translate(key, params);
+
 		containerEl.empty();
 		containerEl.addClass("github-vault-sync-settings");
 
-		containerEl.createEl("h2", { text: "GitHub Vault Sync" });
+		containerEl.createEl("h2", { text: tr("settingTitle") });
 		containerEl.createEl("p", {
-			text: "GitHub REST API를 사용해 데스크톱과 모바일에서 모두 동작할 수 있도록 만든 양방향 동기화 플러그인입니다.",
+			text: tr("settingIntro"),
 		});
 
 		new Setting(containerEl)
-			.setName("GitHub Owner")
-			.setDesc("예: your-name")
+			.setName(tr("settingLanguageName"))
+			.setDesc(tr("settingLanguageDesc"))
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("ko", tr("languageKorean"))
+					.addOption("en", tr("languageEnglish"))
+					.setValue(this.plugin.settings.uiLanguage)
+					.onChange(async (value) => {
+						this.plugin.settings.uiLanguage = value as UiLanguage;
+						await this.plugin.saveSettings();
+						this.display();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName(tr("ownerName"))
+			.setDesc(tr("ownerDesc"))
 			.addText((text) =>
 				text
 					.setPlaceholder("owner")
@@ -324,11 +475,11 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("GitHub Repository")
-			.setDesc("예: my-notes, C17AN/obsidian-sync, https://github.com/C17AN/obsidian-sync")
+			.setName(tr("repoName"))
+			.setDesc(tr("repoDesc"))
 			.addText((text) =>
 				text
-					.setPlaceholder("repository 또는 GitHub URL")
+					.setPlaceholder(tr("repoPlaceholder"))
 					.setValue(this.plugin.settings.githubRepo)
 					.onChange(async (value) => {
 						const parsed = parseGitHubRepositoryInput(value);
@@ -342,8 +493,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Branch")
-			.setDesc("동기화할 브랜치")
+			.setName(tr("branchName"))
+			.setDesc(tr("branchDesc"))
 			.addText((text) =>
 				text
 					.setPlaceholder("main")
@@ -356,8 +507,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 
 		let tokenInputEl: HTMLInputElement | null = null;
 		new Setting(containerEl)
-			.setName("Personal Access Token")
-			.setDesc("Contents write 권한이 필요합니다.")
+			.setName(tr("tokenName"))
+			.setDesc(tr("tokenDesc"))
 			.addText((text) => {
 				tokenInputEl = text.inputEl;
 				text.inputEl.type = "password";
@@ -373,7 +524,7 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			.addExtraButton((button) =>
 				button
 					.setIcon("eye")
-					.setTooltip("토큰 표시 전환")
+					.setTooltip(tr("tokenToggle"))
 					.onClick(() => {
 						if (tokenInputEl) {
 							tokenInputEl.type = tokenInputEl.type === "password" ? "text" : "password";
@@ -382,8 +533,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Repository Base Path")
-			.setDesc("저장소 안에서 동기화할 루트 폴더입니다. 비우면 저장소 루트입니다.")
+			.setName(tr("repoBasePathName"))
+			.setDesc(tr("repoBasePathDesc"))
 			.addText((text) =>
 				text
 					.setPlaceholder("notes")
@@ -395,8 +546,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Vault Base Path")
-			.setDesc("볼트 안에서 동기화할 루트 폴더입니다. 비우면 볼트 전체입니다.")
+			.setName(tr("vaultBasePathName"))
+			.setDesc(tr("vaultBasePathDesc"))
 			.addText((text) =>
 				text
 					.setPlaceholder("Notes")
@@ -408,8 +559,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Include Extensions")
-			.setDesc("쉼표로 구분합니다. 기본값: .md, .canvas, .txt")
+			.setName(tr("includeExtensionsName"))
+			.setDesc(tr("includeExtensionsDesc"))
 			.addText((text) =>
 				text.setValue(this.plugin.settings.includeExtensions).onChange(async (value) => {
 					this.plugin.settings.includeExtensions = value;
@@ -418,8 +569,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Exclude Paths")
-			.setDesc("경로 prefix를 쉼표로 구분합니다. 예: .obsidian/, Templates/")
+			.setName(tr("excludePathsName"))
+			.setDesc(tr("excludePathsDesc"))
 			.addText((text) =>
 				text.setValue(this.plugin.settings.excludePaths).onChange(async (value) => {
 					this.plugin.settings.excludePaths = value;
@@ -428,8 +579,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Device Name")
-			.setDesc("충돌 파일 이름과 커밋 메시지에 사용됩니다.")
+			.setName(tr("deviceNameName"))
+			.setDesc(tr("deviceNameDesc"))
 			.addText((text) =>
 				text
 					.setPlaceholder("iPhone")
@@ -441,8 +592,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Auto Sync On Focus Loss")
-			.setDesc("페이지나 앱이 포커스를 잃을 때 자동 동기화를 시도합니다. 마지막 성공 동기화 후 1분 이내면 건너뜁니다.")
+			.setName(tr("autoSyncOnFocusLossName"))
+			.setDesc(tr("autoSyncOnFocusLossDesc"))
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.autoSyncOnSave).onChange(async (value) => {
 					this.plugin.settings.autoSyncOnSave = value;
@@ -451,8 +602,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Auto Sync Interval (minutes)")
-			.setDesc("0 이하면 비활성화합니다.")
+			.setName(tr("autoSyncIntervalName"))
+			.setDesc(tr("autoSyncIntervalDesc"))
 			.addText((text) =>
 				text
 					.setPlaceholder("5")
@@ -467,8 +618,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Sync On Startup")
-			.setDesc("플러그인 로드 시 자동 동기화를 실행합니다.")
+			.setName(tr("syncOnStartupName"))
+			.setDesc(tr("syncOnStartupDesc"))
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.syncOnStartup).onChange(async (value) => {
 					this.plugin.settings.syncOnStartup = value;
@@ -477,8 +628,8 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Create Conflict Copies")
-			.setDesc("충돌 시 원격 버전을 conflict 사본으로 남기고 현재 로컬 파일을 메인으로 유지합니다.")
+			.setName(tr("createConflictCopiesName"))
+			.setDesc(tr("createConflictCopiesDesc"))
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.createConflictCopies).onChange(async (value) => {
 					this.plugin.settings.createConflictCopies = value;
@@ -487,36 +638,36 @@ class GitHubVaultSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Quick Actions")
-			.setDesc("처음에는 초기 Pull 또는 초기 Push를 한 번 실행해야 합니다.")
+			.setName(tr("quickActionsName"))
+			.setDesc(tr("quickActionsDesc"))
 			.setClass("github-vault-sync-quick-actions")
 			.addButton((button) =>
-				button.setButtonText("연결 확인").onClick(() => {
+				button.setButtonText(tr("buttonCheckConnection")).onClick(() => {
 					this.plugin.runValidate();
 				}),
 			)
 			.addButton((button) =>
-				button.setButtonText("초기 Pull").setCta().onClick(() => {
+				button.setButtonText(tr("buttonInitialPull")).setCta().onClick(() => {
 					this.plugin.runInitializePull();
 				}),
 			)
 			.addButton((button) =>
-				button.setButtonText("초기 Push").onClick(() => {
+				button.setButtonText(tr("buttonInitialPush")).onClick(() => {
 					this.plugin.runInitializePush();
 				}),
 			)
 			.addButton((button) =>
-				button.setButtonText("지금 동기화").onClick(() => {
-					this.plugin.runManualSync();
+				button.setButtonText(tr("buttonSyncNow")).onClick(() => {
+					void this.plugin.runManualSync();
 				}),
 			);
 
 		new Setting(containerEl)
-			.setName("Last Sync")
+			.setName(tr("lastSyncName"))
 			.setDesc(
 				this.plugin.settings.lastSyncAt
 					? new Date(this.plugin.settings.lastSyncAt).toLocaleString()
-					: "아직 동기화 기록이 없습니다.",
+					: tr("lastSyncNever"),
 			);
 	}
 }

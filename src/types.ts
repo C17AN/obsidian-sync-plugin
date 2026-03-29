@@ -1,3 +1,5 @@
+export type UiLanguage = "ko" | "en";
+
 export interface FileSyncState {
 	localHash: string | null;
 	remoteSha: string | null;
@@ -17,9 +19,11 @@ export interface GitHubSyncSettings {
 	syncOnStartup: boolean;
 	createConflictCopies: boolean;
 	deviceName: string;
+	uiLanguage: UiLanguage;
 	initialized: boolean;
 	lastSyncAt: string;
 	fileStates: Record<string, FileSyncState>;
+	pendingRenames: Record<string, string>;
 }
 
 export interface RemoteFileEntry {
