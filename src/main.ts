@@ -118,6 +118,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 			this.requestSync({
 				action: () => this.runSessionAwareSync(),
 				label: this.translate("actionStartupSync"),
+				notifyOnStart: true,
 				notifyOnFailure: true,
 				notifyOnSuccess: true,
 				suppressFastForwardNotice: true,
@@ -293,6 +294,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 		this.requestSync({
 			action: () => this.runSessionAwareSync(),
 			label: this.translate("actionFocusLossSync"),
+			notifyOnStart: true,
 			notifyOnFailure: true,
 			notifyOnSuccess: true,
 			suppressFastForwardNotice: true,
@@ -314,6 +316,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 			this.requestSync({
 				action: () => this.runSessionAwareSync(),
 				label: this.translate("actionScheduledSync"),
+				notifyOnStart: true,
 				notifyOnFailure: true,
 				notifyOnSuccess: true,
 				suppressFastForwardNotice: true,
@@ -353,7 +356,7 @@ export default class GitHubVaultSyncPlugin extends Plugin {
 		this.isSyncing = true;
 		this.updateStatusBar(this.translate("statusInProgress", { label: request.label }));
 		if (request.notifyOnStart) {
-			new Notice(this.translate("manualSyncStarted"), 3000);
+			new Notice(this.translate("noticeStarted", { label: request.label }), 3000);
 		}
 
 		try {

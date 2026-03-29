@@ -240,6 +240,48 @@ export class SyncEngine {
 
 			if (!allowWrite) {
 				if (localFile && remote) {
+					if (!previous) {
+						const remoteContent = await this.getRemoteContent(client, remoteContentCache, remote.sha);
+						const remoteHash = await hashText(remoteContent);
+
+						if (remoteHash === localHash) {
+							nextState[vaultPath] = { localHash, remoteSha: remote.sha };
+							counters.unchanged += 1;
+						} else {
+							if (settings.createConflictCopies && localContent !== null) {
+								await this.writeConflictCopy(vaultPath, localContent, "local");
+								counters.conflicts += 1;
+							}
+
+							await this.writeVaultFile(vaultPath, remoteContent);
+							nextState[vaultPath] = {
+								localHash: remoteHash,
+								remoteSha: remote.sha,
+							};
+							counters.downloaded += 1;
+						}
+						continue;
+					}
+
+					const localChanged = localHash !== previous.localHash;
+					const remoteChanged = remote.sha !== previous.remoteSha;
+
+					if (!localChanged && !remoteChanged) {
+						nextState[vaultPath] = { localHash, remoteSha: remote.sha };
+						counters.unchanged += 1;
+						continue;
+					}
+
+					if (!localChanged && remoteChanged) {
+						downloads.push({ remoteSha: remote.sha, vaultPath });
+						continue;
+					}
+
+					if (localChanged && !remoteChanged) {
+						nextState[vaultPath] = previous;
+						continue;
+					}
+
 					const remoteContent = await this.getRemoteContent(client, remoteContentCache, remote.sha);
 					const remoteHash = await hashText(remoteContent);
 
@@ -263,22 +305,23 @@ export class SyncEngine {
 				}
 
 				if (localFile && !remote) {
-					if (!previous || previous.remoteSha === null) {
-						nextState[vaultPath] = {
-							localHash,
-							remoteSha: previous?.remoteSha ?? null,
-						};
-						counters.unchanged += 1;
-					} else {
-						if (settings.createConflictCopies && localContent !== null && localHash !== previous.localHash) {
-							await this.writeConflictCopy(vaultPath, localContent, "local");
-							counters.conflicts += 1;
-						}
-
-						await this.deleteVaultPath(vaultPath);
-						delete nextState[vaultPath];
-						counters.deletedLocal += 1;
+					if (!previous) {
+						continue;
 					}
+
+					if (previous.remoteSha === null) {
+						nextState[vaultPath] = previous;
+						continue;
+					}
+
+					if (settings.createConflictCopies && localContent !== null && localHash !== previous.localHash) {
+						await this.writeConflictCopy(vaultPath, localContent, "local");
+						counters.conflicts += 1;
+					}
+
+					await this.deleteVaultPath(vaultPath);
+					delete nextState[vaultPath];
+					counters.deletedLocal += 1;
 					continue;
 				}
 
